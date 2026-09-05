@@ -124,6 +124,7 @@ class IntuitionLibrary(LibImpl):
         es_TextFormat = ctx.mem.r32(easy_struct + 12)  # EasyStruct.es_TextFormat
         msg = ctx.mem.r_cstr(es_TextFormat)
         log_intui.error("-----> EasyRequest '%s'", msg)
+        return 1
 
     def CurrentTime(self, ctx, secs_ptr, micros_ptr):
         secs, micros = TimerDevice.get_sys_time()

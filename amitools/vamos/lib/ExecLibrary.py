@@ -4,6 +4,7 @@ from amitools.vamos.machine.regs import *
 from amitools.vamos.libnative import MakeFuncs, InitStruct, MakeLib, LibFuncs, InitRes
 from amitools.vamos.libcore import LibImpl
 from amitools.vamos.astructs import BYTE, CSTR
+from amitools.vamos.error import VamosInternalError, UnsupportedFeatureError
 from amitools.vamos.libstructs import (
     ExecLibraryStruct,
     StackSwapStruct,
