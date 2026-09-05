@@ -120,7 +120,7 @@ class IntuitionLibrary(LibImpl):
         msg = ctx.mem.r_cstr(IText)
         log_intui.error("-----> AutoRequest '%s'", msg)
 
-    def EasyRequestArgs(self, ctx, easy_struct):
+    def EasyRequestArgs(self, ctx, window, easy_struct, idcmp_ptr, args):
         es_TextFormat = ctx.mem.r32(easy_struct + 12)  # EasyStruct.es_TextFormat
         msg = ctx.mem.r_cstr(es_TextFormat)
         log_intui.error("-----> EasyRequest '%s'", msg)
