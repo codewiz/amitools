@@ -19,5 +19,6 @@ class DosProcess(ExecTask):
         )
 
     def free(self):
+        self.proc.free_local_vars()
         self.proc.free()
         super().free()
