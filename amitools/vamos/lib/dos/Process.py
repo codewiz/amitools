@@ -4,7 +4,8 @@ from amitools.vamos.libstructs.dos import (
     ProcessStruct,
     PathStruct,
 )
-from amitools.vamos.libstructs.exec_ import MessageStruct, MinListStruct
+from amitools.vamos.libstructs.exec_ import MessageStruct, MinListStruct, NodeStruct
+from amitools.vamos.libstructs.dos import LocalVarStruct
 from amitools.vamos.log import log_proc
 from amitools.vamos.machine.regs import (
     REG_D0,
@@ -84,6 +85,7 @@ class Process(DosProcess):
             self.free_shell_packet()
         else:
             self.free_cwd()
+        self.free_local_vars()
         self.free_task_struct()
         self.free_cli_struct()
         self.free_args()
@@ -354,6 +356,95 @@ class Process(DosProcess):
     def get_local_vars(self):
         localvars_addr = self.this_task.pr_LocalVars.addr
         return MinListStruct(self.ctx.mem, localvars_addr)
+
+    # ----- local variables: struct LocalVar nodes on pr_LocalVars -----
+
+    def _var_alloc(self, label, size):
+        return self.ctx.alloc.alloc_memory(size, label=label).addr
+
+    def _var_free(self, addr):
+        self.ctx.alloc.free_memory(self.ctx.alloc.get_memory(addr))
+
+    def iter_local_vars(self):
+        node_addr = self.get_local_vars().mlh_Head.aptr
+        while True:
+            node = LocalVarStruct(self.ctx.mem, node_addr)
+            succ = node.lv_Node.ln_Succ.aptr
+            if succ == 0:
+                return
+            yield node
+            node_addr = succ
+
+    def find_var(self, name, vtype):
+        for node in self.iter_local_vars():
+            if node.lv_Node.ln_Type.val != vtype:
+                continue
+            if self.ctx.mem.r_cstr(node.lv_Node.ln_Name.aptr).lower() == name.lower():
+                return node
+        return None
+
+    def create_var(self, name, vtype, varlist=None):
+        """add an empty variable at the head of the list (own list by default)"""
+        if varlist is None:
+            varlist = self.get_local_vars()
+        mem = self.ctx.mem
+        node_addr = self._var_alloc(
+            "ShellVar(%s)" % name, LocalVarStruct.get_size() + len(name) + 1
+        )
+        name_addr = node_addr + LocalVarStruct.get_size()
+        node = LocalVarStruct(mem, node_addr)
+        mem.w_cstr(name_addr, name)
+        node.lv_Node.ln_Name.aptr = name_addr
+        node.lv_Node.ln_Type.val = vtype
+        node.lv_Node.ln_Pri.val = 0
+        node.lv_Flags.val = 0
+        node.lv_Value.aptr = 0
+        node.lv_Len.val = 0
+        head_addr = varlist.mlh_Head.aptr
+        NodeStruct(mem, head_addr).ln_Pred.aptr = node_addr
+        varlist.mlh_Head.aptr = node_addr
+        node.lv_Node.ln_Succ.aptr = head_addr
+        node.lv_Node.ln_Pred.aptr = varlist.mlh_Head.addr
+        return node
+
+    def set_var_value(self, node, size, src_addr=None, value=None):
+        """store the block at src_addr, or the string value"""
+        if node.lv_Value.aptr != 0:
+            self._var_free(node.lv_Value.aptr)
+            node.lv_Value.aptr = 0
+        buf_addr = self._var_alloc("ShellVarBuffer", size)
+        node.lv_Value.aptr = buf_addr
+        node.lv_Len.val = size
+        if src_addr is not None:
+            self.ctx.mem.copy_block(src_addr, buf_addr, size)
+        else:
+            self.ctx.mem.w_cstr(buf_addr, value)
+
+    def delete_var(self, node):
+        mem = self.ctx.mem
+        if node.lv_Value.aptr != 0:
+            self._var_free(node.lv_Value.aptr)
+        succ = node.lv_Node.ln_Succ.aptr
+        pred = node.lv_Node.ln_Pred.aptr
+        NodeStruct(mem, pred).ln_Succ.aptr = succ
+        NodeStruct(mem, succ).ln_Pred.aptr = pred
+        self._var_free(node.addr)
+
+    def free_local_vars(self):
+        for node in list(self.iter_local_vars()):
+            self.delete_var(node)
+
+    def copy_local_vars(self, dst):
+        """duplicate this process's variables onto the MinList dst of a
+        child process, as CreateNewProc does by default (NP_CopyVars)"""
+        for node in self.iter_local_vars():
+            name = self.ctx.mem.r_cstr(node.lv_Node.ln_Name.aptr)
+            new = self.create_var(name, node.lv_Node.ln_Type.val, dst)
+            new.lv_Node.ln_Pri.val = node.lv_Node.ln_Pri.val
+            new.lv_Flags.val = node.lv_Flags.val
+            size = node.lv_Len.val
+            if node.lv_Value.aptr != 0 and size > 0:
+                self.set_var_value(new, size, src_addr=node.lv_Value.aptr)
 
     def get_input(self):
         fh_b = self.this_task.pr_CIS.aptr >> 2

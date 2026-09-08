@@ -15,6 +15,7 @@ from amitools.vamos.libstructs import (
     DateStampStruct,
     DateTimeStruct,
     LocalVarStruct,
+    MinListStruct,
     NodeStruct,
     SegmentStruct,
     FileHandleStruct,
@@ -91,7 +92,6 @@ class DosLibrary(LibImpl):
         self.dos_entries = {}
         self.errstrings = {}
         self.resident = []
-        self.local_vars = {}
         self.lib_struct = DosLibraryStruct(ctx.mem, base_addr)
         # setup RootNode
         self.root_struct = ctx.alloc.alloc_astruct(RootNodeStruct, label="RootNode")
@@ -145,11 +145,6 @@ class DosLibrary(LibImpl):
         # free resident nodes
         for res in self.resident:
             self._free_mem(res)
-        # free shell variables
-        while len(self.local_vars) > 0:
-            var = list(self.local_vars.values())[0]
-            self.delete_var(ctx, var)
-        # self.delete_var(ctx,var)
         # free RootNode
         self.root_struct.free()
         # free DosInfo
@@ -385,62 +380,6 @@ class DosLibrary(LibImpl):
 
     # ----- Variables -----
 
-    def find_var(self, ctx, name, flags):
-        if (name.lower(), flags & 0xFF) in self.local_vars:
-            return self.local_vars[(name.lower(), flags & 0xFF)]
-        else:
-            return None
-
-    def create_var(self, ctx, name, flags):
-        varlist = ctx.process.get_local_vars()
-        varlist_struct = varlist
-        node_addr = self._alloc_mem(
-            "ShellVar(%s)" % name, LocalVarStruct.get_size() + len(name) + 1
-        )
-        name_addr = node_addr + LocalVarStruct.get_size()
-        node = LocalVarStruct(ctx.mem, node_addr)
-        ctx.mem.w_cstr(name_addr, name)
-        node.lv_Node.ln_Name.aptr = name_addr
-        node.lv_Node.ln_Type.val = flags & 0xFF
-        node.lv_Value.aptr = 0
-        head_addr = varlist_struct.mlh_Head.aptr
-        head = NodeStruct(ctx.mem, head_addr)
-        head.ln_Pred.aptr = node_addr
-        varlist_struct.mlh_Head.aptr = node_addr
-        node.lv_Node.ln_Succ.aptr = head_addr
-        node.lv_Node.ln_Pred.aptr = varlist_struct.mlh_Head.addr
-        self.local_vars[(name.lower(), flags & 0xFF)] = node
-        return node
-
-    def set_var(self, ctx, node, buff_ptr, size, value, flags):
-        if node.lv_Value.aptr != 0:
-            self._free_mem(node.lv_Value.aptr)
-            node.lv_Value.aptr = 0
-        buf_addr = self._alloc_mem("ShellVarBuffer", size)
-        node.lv_Value.aptr = buf_addr
-        node.lv_Len.val = size
-        if flags & self.GVF_BINARY_VAR:
-            ctx.mem.copy_block(buff_ptr, buf_addr, size)
-        else:
-            ctx.mem.w_cstr(buf_addr, value)
-
-    def delete_var(self, ctx, node):
-        buf_addr = node.lv_Value.aptr
-        buf_len = node.lv_Len.val
-        name_addr = node.lv_Node.ln_Name.aptr
-        name = ctx.mem.r_cstr(name_addr)
-        if buf_addr != 0:
-            self._free_mem(buf_addr)
-        node.lv_Value.aptr = 0
-        succ = node.lv_Node.ln_Succ.aptr
-        pred = node.lv_Node.ln_Pred.aptr
-        NodeStruct(ctx.mem, pred).ln_Succ.aptr = succ
-        NodeStruct(ctx.mem, succ).ln_Pred.aptr = pred
-        self._free_mem(node.addr)
-        for k in list(self.local_vars.keys()):
-            if self.local_vars[k] == node:
-                del self.local_vars[k]
-
     def GetVar(self, ctx):
         name_ptr = ctx.cpu.r_reg(REG_D1)
         buff_ptr = ctx.cpu.r_reg(REG_D2)
@@ -451,7 +390,7 @@ class DosLibrary(LibImpl):
             return DOSFALSE
         name = ctx.mem.r_cstr(name_ptr)
         if not flags & self.GVF_GLOBAL_ONLY:
-            node = self.find_var(ctx, name, flags & 0xFF)
+            node = ctx.process.find_var(name, flags & 0xFF)
             if node != None:
                 nodelen = node.lv_Len.val
                 if flags & self.GVF_BINARY_VAR:
@@ -476,7 +415,7 @@ class DosLibrary(LibImpl):
         name_ptr = ctx.cpu.r_reg(REG_D1)
         vtype = ctx.cpu.r_reg(REG_D2)
         name = ctx.mem.r_cstr(name_ptr)
-        node = self.find_var(ctx, name, vtype)
+        node = ctx.process.find_var(name, vtype & 0xFF)
         if node == None:
             self.setioerr(ctx, ERROR_OBJECT_NOT_FOUND)
             log_dos.info('FindVar("%s", 0x%x) -> NULL', name, vtype)
@@ -494,9 +433,9 @@ class DosLibrary(LibImpl):
         vtype = flags & 0xFF
         if buff_ptr == 0:
             if not flags & self.GVF_GLOBAL_ONLY:
-                node = self.find_var(ctx, name, vtype)
+                node = ctx.process.find_var(name, vtype)
                 if node != None:
-                    self.delete_var(ctx, node)
+                    ctx.process.delete_var(node)
                 return DOSTRUE
         else:
             if flags & self.GVF_BINARY_VAR:
@@ -507,11 +446,14 @@ class DosLibrary(LibImpl):
                 log_dos.info('SetVar("%s") to %s', name, value)
                 size = len(value) + 1
             if not flags & self.GVF_GLOBAL_ONLY:
-                node = self.find_var(ctx, name, flags)
-                if node == None and buff_ptr != 0:
-                    node = self.create_var(ctx, name, flags)
-                if node != None:
-                    self.set_var(ctx, node, buff_ptr, size, value, flags)
+                proc = ctx.process
+                node = proc.find_var(name, vtype)
+                if node == None:
+                    node = proc.create_var(name, vtype)
+                if flags & self.GVF_BINARY_VAR:
+                    proc.set_var_value(node, size, src_addr=buff_ptr)
+                else:
+                    proc.set_var_value(node, size, value=value)
                 return DOSTRUE
         return 0
 
@@ -520,10 +462,10 @@ class DosLibrary(LibImpl):
         flags = ctx.cpu.r_reg(REG_D4)
         name = ctx.mem.r_cstr(name_ptr)
         if not flags & self.GVF_GLOBAL_ONLY:
-            node = self.find_var(ctx, name, flags)
+            node = ctx.process.find_var(name, flags & 0xFF)
             log_dos.info('DeleteVar("%s")', name)
             if node != None:
-                self.delete_var(ctx, node)
+                ctx.process.delete_var(node)
             return DOSTRUE
 
     # ----- Signals ----------------------
@@ -1797,7 +1739,16 @@ class DosLibrary(LibImpl):
             cwd_lock = cur_proc.cwd_lock
             cwd = cur_proc.cwd
             # create a process and run it...
-            proc = Process(ctx, binary, arg_str, cwd=cwd, cwd_lock=cwd_lock)
+            # System() accepts the CreateNewProc tags; honor the stack size
+            stack_size = tag_list.get_tag_data(DosTag.NP_StackSize, 4096)
+            proc = Process(
+                ctx,
+                binary,
+                arg_str,
+                stack_size=stack_size,
+                cwd=cwd,
+                cwd_lock=cwd_lock,
+            )
             if not proc.ok:
                 log_dos.warning(
                     "SystemTagList: can't create process for '%s' args=%s",
@@ -1805,7 +1756,14 @@ class DosLibrary(LibImpl):
                     arg_str,
                 )
                 return DOSTRUE
-            return run_sub_process(ctx.scheduler, ctx.runner, proc)
+            # a child inherits the parent's local variables (NP_CopyVars)
+            cur_proc.copy_local_vars(proc.get_local_vars())
+            # the child is the current process while it runs
+            ctx.set_cur_process(proc)
+            try:
+                return run_sub_process(ctx.scheduler, ctx.runner, proc)
+            finally:
+                ctx.set_cur_process(cur_proc)
 
     def LoadSeg(self, ctx):
         name_ptr = ctx.cpu.r_reg(REG_D1)
@@ -2204,6 +2162,15 @@ class DosLibrary(LibImpl):
                     output_fh = parent.cos.bptr
         proc.cis.bptr = input_fh
         proc.cos.bptr = output_fh
+
+        # local variables: an empty list, filled from the parent unless
+        # NP_CopyVars is FALSE
+        varlist = MinListStruct(ctx.mem, proc.local_vars.addr)
+        varlist.mlh_Head.aptr = varlist.addr + 4
+        varlist.mlh_Tail.aptr = 0
+        varlist.mlh_TailPred.aptr = varlist.addr
+        if tags.get_tag_data(DosTag.NP_CopyVars, 1) and ctx.process:
+            ctx.process.copy_local_vars(varlist)
 
         port_addr = proc.msg_port.addr
         self._init_child_msgport(ctx, port_addr, proc.addr)
