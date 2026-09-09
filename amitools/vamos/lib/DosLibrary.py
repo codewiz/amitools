@@ -69,6 +69,7 @@ class DosLibrary(LibImpl):
     GVF_GLOBAL_ONLY = 0x100
     GVF_LOCAL_ONLY = 0x200
     GVF_BINARY_VAR = 0x400
+    GVF_DONT_NULL_TERM = 0x800
 
     MAX_SHOW_DATA = 32
     _waitpkt_blocked = False
@@ -451,7 +452,12 @@ class DosLibrary(LibImpl):
                 proc = ctx.process.proc
                 var = proc.find_var(name, vtype)
                 if var == None:
-                    var = proc.create_var(name, vtype)
+                    # the value flags are kept in lv_Flags
+                    var = proc.create_var(
+                        name,
+                        vtype,
+                        flags & (self.GVF_BINARY_VAR | self.GVF_DONT_NULL_TERM),
+                    )
                 if flags & self.GVF_BINARY_VAR:
                     proc.set_var_value(var, size, src_addr=buff_ptr)
                 else:

@@ -32,13 +32,21 @@ class Process(ProcessStruct):
                 return var
         return None
 
-    def create_var(self, name, vtype):
-        var = LocalVar.alloc_var(self._alloc, name, vtype)
+    def create_var(self, name, vtype, flags=0):
+        """add an empty variable, keeping the list sorted by name without
+        regard to case like dos.library does"""
+        var = LocalVar.alloc_var(self._alloc, name, vtype, flags)
         # pr_LocalVars is a MinList holding full Nodes: a Node starts with
         # the MinNode succ/pred pair, so view it as the list's node type
         varlist = self.local_vars
-        min_node = varlist.head.get_ref_type()._bind(self._mem, var.addr)
-        varlist.add_head(min_node)
+        node_type = varlist.head.get_ref_type()
+        min_node = node_type._bind(self._mem, var.addr)
+        pred = None
+        for old in self.iter_local_vars():
+            if old.name.lower() > name.lower():
+                break
+            pred = node_type._bind(self._mem, old.addr)
+        varlist.insert(min_node, pred)
         return var
 
     def set_var_value(self, var, size, src_addr=None, value=None):
@@ -55,9 +63,8 @@ class Process(ProcessStruct):
         """duplicate our variables onto Process dst, as CreateNewProc does for
         a child by default (NP_CopyVars)"""
         for var in self.iter_local_vars():
-            new = dst.create_var(var.name, var.node.type.val)
+            new = dst.create_var(var.name, var.node.type.val, var.flags.val)
             new.node.pri.val = var.node.pri.val
-            new.flags.val = var.flags.val
             size = var.len.val
             if var.value.aptr != 0 and size > 0:
                 dst.set_var_value(new, size, src_addr=var.value.aptr)

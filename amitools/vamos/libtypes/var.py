@@ -8,7 +8,7 @@ class LocalVar(LocalVarStruct):
     The name is stored right behind the struct, the value in its own block."""
 
     @classmethod
-    def alloc_var(cls, alloc, name, vtype):
+    def alloc_var(cls, alloc, name, vtype, flags=0):
         var = cls.alloc(
             alloc, tag="LocalVar(%s)" % name, size=cls.get_size() + len(name) + 1
         )
@@ -17,7 +17,7 @@ class LocalVar(LocalVarStruct):
         var.node.name.aptr = name_addr
         var.node.type.val = vtype
         var.node.pri.val = 0
-        var.flags.val = 0
+        var.flags.val = flags
         var.value.aptr = 0
         var.len.val = 0
         return var
