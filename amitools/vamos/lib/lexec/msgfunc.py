@@ -6,6 +6,8 @@ from amitools.vamos.libstructs import NodeType, MsgPortFlags
 from amitools.vamos.astructs import CSTR
 from amitools.vamos.libstructs.exec_ import MsgPortStruct
 from amitools.vamos.lib.intuition import IntuiMessageStruct
+from amitools.vamos.error import UnsupportedFeatureError
+from amitools.vamos.machine.regs import REG_A7
 
 
 class MessageFunc(FuncBase):
@@ -17,14 +19,28 @@ class MessageFunc(FuncBase):
         self.port_mgr = port_mgr
 
     def create_msg_port(self) -> MsgPort:
+        # get my task
+        my_task = self.task_func.find_task(None)
+
+        # In amifuse's single-task fallback mode there is no scheduler-backed
+        # signal allocation. Handlers like CDFileSystem expect CreateMsgPort()
+        # to yield a port using signal bit 0, matching the historical
+        # port-handler-support behavior.
+        if self.signal_func.get_my_sched_task() is None:
+            msg_port = MsgPort.alloc(self.ctx.alloc, tag="exec_port")
+            msg_port.new(sig_bit=0, sig_task=my_task)
+            log_exec.info(
+                "CreateMsgPort: fallback signal=0 my_task=%s port=%s",
+                my_task,
+                msg_port,
+            )
+            return msg_port
+
         # alloc signal first
         signal = self.signal_func.alloc_signal(-1)
         if signal == -1:
             log_exec.error("CreateMsgPort: no signal!")
             return None
-
-        # get my task
-        my_task = self.task_func.find_task(None)
 
         # alloc port
         msg_port = MsgPort.alloc(self.ctx.alloc, tag="exec_port")
@@ -45,7 +61,10 @@ class MessageFunc(FuncBase):
         log_exec.info("DeleteMsgPort(%s) (signal %d)", msg_port, signal)
 
         # free signal
-        self.signal_func.free_signal(signal)
+        if not (
+            self.signal_func.get_my_sched_task() is None and 0 <= signal < 16
+        ):
+            self.signal_func.free_signal(signal)
 
         # free port
         msg_port.free(self.ctx.alloc)
@@ -55,7 +74,9 @@ class MessageFunc(FuncBase):
         has_port = self.port_mgr.has_port(port.addr)
         if has_port:
             log_exec.info("PutMsg(%s, %s) -> PortMgr", port, msg)
+            msg.node.type.val = msg_type
             self.port_mgr.put_msg(port.addr, msg.addr)
+            self._signal_port(port)
             return
 
         # set type
@@ -89,7 +110,11 @@ class MessageFunc(FuncBase):
         has_port = self.port_mgr.has_port(port.addr)
         if has_port:
             msg_addr = self.port_mgr.get_msg(port.addr)
+            if msg_addr is None:
+                log_exec.info("GetMsg(%s) -> PortMgr -> None", port)
+                return None
             msg = Message(self.ctx.mem, msg_addr)
+            self._unlink_msg(msg_addr)
             log_exec.info("GetMsg(%s) -> PortMgr -> %s", port, msg)
             return msg
 
@@ -132,6 +157,8 @@ class MessageFunc(FuncBase):
 
     def add_port(self, port: MsgPort):
         log_exec.info("AddPort(%s)", port)
+        if not self.port_mgr.has_port(port.addr):
+            self.port_mgr.register_port(port.addr)
         # set port type
         port.node.type.val = NodeType.NT_MSGPORT
         # enqueue
@@ -139,6 +166,8 @@ class MessageFunc(FuncBase):
 
     def rem_port(self, port: MsgPort):
         log_exec.info("RemPort(%s)", port)
+        if self.port_mgr.has_port(port.addr):
+            self.port_mgr.unregister_port(port.addr)
         # remove node
         port.node.remove()
 
@@ -146,6 +175,8 @@ class MessageFunc(FuncBase):
         # find port by name in port list
         port_name = name.str
         port = self.exec_lib.port_list.find_name(port_name, promote=True)
+        if port is None:
+            port = self._find_registered_port(port_name)
         log_exec.info("FindPort(%s) -> %s", port_name, port)
         return port
 
@@ -161,3 +192,37 @@ class MessageFunc(FuncBase):
                 return 0
 
             self.put_msg(port, msg, msg_type=NodeType.NT_REPLYMSG)
+
+    def _signal_port(self, port: MsgPort):
+        try:
+            flags = port.flags.val
+            if flags == MsgPortFlags.PA_SIGNAL:
+                task = port.sig_task.aptr
+                if task is not None:
+                    sig_bit = port.sig_bit.val
+                    self.signal_func.signal(task, 1 << sig_bit)
+        except Exception:
+            pass
+
+    def _unlink_msg(self, msg_addr):
+        try:
+            ln_succ = self.ctx.mem.r32(msg_addr + 0)
+            ln_pred = self.ctx.mem.r32(msg_addr + 4)
+            if ln_succ != 0 and ln_pred != 0:
+                self.ctx.mem.w32(ln_pred + 0, ln_succ)
+                self.ctx.mem.w32(ln_succ + 4, ln_pred)
+        except Exception:
+            pass
+
+    def _find_registered_port(self, port_name):
+        for port_addr in self.port_mgr.ports:
+            try:
+                port = MsgPort(self.ctx.mem, port_addr)
+                name_addr = port.node.name.aptr
+                if name_addr == 0:
+                    continue
+                if self.ctx.mem.r_cstr(name_addr) == port_name:
+                    return port
+            except Exception:
+                continue
+        return None
