@@ -16,9 +16,11 @@
    usage: dos_sysvar <own_path>      (parent)
           dos_sysvar <own_path> child (started by the parent)
 */
+#include <exec/tasks.h>
 #include <dos/dos.h>
 #include <dos/var.h>
 #include <dos/dostags.h>
+#include <proto/exec.h>
 #include <proto/dos.h>
 #include <utility/tagitem.h>
 #include <string.h>
@@ -34,21 +36,32 @@
 
 #define VAR   "VAMOSTEST"
 #define FLAGS (GVF_LOCAL_ONLY | LV_VAR)
+#define STACK 65536
 
 int main(int argc, char *argv[])
 {
   char buf[64];
   char cmd[256];
   struct TagItem tags[] = {
+    {NP_StackSize, STACK},
     {TAG_DONE, 0}
   };
   struct TagItem nocopy_tags[] = {
+    {NP_StackSize, STACK},
     {NP_CopyVars, FALSE},
     {TAG_DONE, 0}
   };
   LONG rc;
 
   if(argc == 3 && strcmp(argv[2], "child") == 0) {
+    struct Task *task = FindTask(NULL);
+    ULONG stack = (ULONG)task->tc_SPUpper - (ULONG)task->tc_SPLower;
+
+    /* the parent asked for a bigger stack than the default */
+    if(stack < STACK) {
+      Printf("child: stack is %lu bytes\n", stack);
+      return 7;
+    }
     if(GetVar(VAR, buf, sizeof(buf), FLAGS) < 0) {
       Printf("child: no " VAR "\n");
       return 2;
